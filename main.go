@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/gin-gonic/gin"
-	"github.com/linux-do/tiktoken-go"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"golang.org/x/net/http2"
@@ -21,7 +20,7 @@ import (
 	"time"
 )
 
-const INSTRUCT_MODEL = "gpt-3.5-turbo-instruct"
+const InstructModel = "gpt-3.5-turbo-instruct"
 
 type config struct {
 	Bind                 string            `json:"bind"`
@@ -31,11 +30,11 @@ type config struct {
 	CodexApiKey          string            `json:"codex_api_key"`
 	CodexApiOrganization string            `json:"codex_api_organization"`
 	CodexApiProject      string            `json:"codex_api_project"`
-	CodexMaxTokens       int               `json:"codex_max_tokens"`
 	ChatApiBase          string            `json:"chat_api_base"`
 	ChatApiKey           string            `json:"chat_api_key"`
 	ChatApiOrganization  string            `json:"chat_api_organization"`
 	ChatApiProject       string            `json:"chat_api_project"`
+	ChatMaxTokens        int               `json:"chat_max_tokens"`
 	ChatModelDefault     string            `json:"chat_model_default"`
 	ChatModelMap         map[string]string `json:"chat_model_map"`
 }
@@ -135,9 +134,8 @@ func closeIO(c io.Closer) {
 }
 
 type ProxyService struct {
-	cfg       *config
-	client    *http.Client
-	tokenizer *tiktoken.Tiktoken
+	cfg    *config
+	client *http.Client
 }
 
 func NewProxyService(cfg *config) (*ProxyService, error) {
@@ -146,15 +144,9 @@ func NewProxyService(cfg *config) (*ProxyService, error) {
 		return nil, err
 	}
 
-	tokenizer, err := tiktoken.EncodingForModel(INSTRUCT_MODEL)
-	if nil != err {
-		return nil, err
-	}
-
 	return &ProxyService{
-		cfg:       cfg,
-		client:    client,
-		tokenizer: tokenizer,
+		cfg:    cfg,
+		client: client,
 	}, nil
 }
 
@@ -180,6 +172,12 @@ func (s *ProxyService) completions(c *gin.Context) {
 	}
 	body, _ = sjson.SetBytes(body, "model", model)
 	body, _ = sjson.DeleteBytes(body, "intent")
+	body, _ = sjson.DeleteBytes(body, "intent_threshold")
+	body, _ = sjson.DeleteBytes(body, "intent_content")
+
+	if int(gjson.GetBytes(body, "max_tokens").Int()) > s.cfg.ChatMaxTokens {
+		body, _ = sjson.SetBytes(body, "max_tokens", s.cfg.ChatMaxTokens)
+	}
 
 	proxyUrl := s.cfg.ChatApiBase + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, proxyUrl, io.NopCloser(bytes.NewBuffer(body)))
@@ -242,33 +240,9 @@ func (s *ProxyService) codeCompletions(c *gin.Context) {
 		return
 	}
 
-	prompt := gjson.GetBytes(body, "prompt").String()
-	suffix := gjson.GetBytes(body, "suffix").String()
-	inputTokens := len(s.tokenizer.Encode(prompt, nil, nil))
-	suffixTokens := len(s.tokenizer.Encode(suffix, nil, nil))
-	outputTokens := int(gjson.GetBytes(body, "max_tokens").Int())
-
-	totalTokens := inputTokens + suffixTokens + outputTokens
-	if totalTokens > s.cfg.CodexMaxTokens { // reduce
-		left, right := 0, len(prompt)
-		for left < right {
-			mid := (left + right) / 2
-			subPrompt := prompt[mid:]
-			subInputTokens := len(s.tokenizer.Encode(subPrompt, nil, nil))
-			totalTokens = subInputTokens + suffixTokens + outputTokens
-			if totalTokens > s.cfg.CodexMaxTokens {
-				left = mid + 1
-			} else {
-				right = mid
-			}
-		}
-
-		body, _ = sjson.SetBytes(body, "prompt", prompt[left:])
-	}
-
 	body, _ = sjson.DeleteBytes(body, "extra")
 	body, _ = sjson.DeleteBytes(body, "nwo")
-	body, _ = sjson.SetBytes(body, "model", INSTRUCT_MODEL)
+	body, _ = sjson.SetBytes(body, "model", InstructModel)
 
 	proxyUrl := s.cfg.CodexApiBase + "/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, proxyUrl, io.NopCloser(bytes.NewBuffer(body)))
